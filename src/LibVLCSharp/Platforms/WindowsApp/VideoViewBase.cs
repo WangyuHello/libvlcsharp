@@ -1,15 +1,13 @@
 ﻿using System;
 using System.Runtime.InteropServices;
+using DirectN;
 using LibVLCSharp.Shared;
-using SharpDX;
-using SharpDX.Direct3D11;
-using SharpDX.DXGI;
-using SharpDX.Mathematics.Interop;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 using Windows.ApplicationModel;
-using Windows.UI.Xaml;
-using Windows.UI.Xaml.Controls;
+using WinRT;
 
-namespace LibVLCSharp.Platforms.UWP
+namespace LibVLCSharp.Platforms.WindowsApp
 {
     /// <summary>
     /// VideoView base class for the UWP platform
@@ -20,12 +18,12 @@ namespace LibVLCSharp.Platforms.UWP
         private const string PartSwapChainPanelName = "SwapChainPanel";
 
         SwapChainPanel? _panel;
-        SharpDX.Direct3D11.Device? _d3D11Device;
-        SharpDX.DXGI.Device1? _device;
-        SharpDX.DXGI.Device3? _device3;
-        SwapChain2? _swapChain2;
-        SwapChain1? _swapChain;
-        const string Mobile = "Windows.Mobile";
+        IComObject<ID3D11DeviceContext>? _deviceContext;
+        IComObject<ID3D11Device>? _d3d11Device;
+        IComObject<IDXGIDevice1>? _device1;
+        IComObject<IDXGIDevice3>? _device3;
+        IComObject<IDXGISwapChain2>? _swapChain2;
+        IComObject<IDXGISwapChain1>? _swapChain1;
         bool _loaded;
 
         /// <summary>
@@ -38,8 +36,6 @@ namespace LibVLCSharp.Platforms.UWP
             if (!DesignMode.DesignModeEnabled)
             {
                 Unloaded += (s, e) => DestroySwapChain();
-
-                Application.Current.Suspending += (s, e) => { Trim(); };
             }
         }
 
@@ -62,7 +58,10 @@ namespace LibVLCSharp.Platforms.UWP
             {
                 if (_loaded)
                 {
-                    UpdateSize();
+                    if (eventArgs.PreviousSize != eventArgs.NewSize)
+                    {
+                        UpdateSize();
+                    }
                 }
                 else
                 {
@@ -95,11 +94,12 @@ namespace LibVLCSharp.Platforms.UWP
                 {
                     throw new InvalidOperationException("You must wait for the VideoView to be loaded before calling GetSwapChainOptions()");
                 }
-
+                var deviceContextPtr = Marshal.GetComInterfaceForObject(_deviceContext!.Object, typeof(ID3D11DeviceContext));
+                var swapChainPtr = Marshal.GetComInterfaceForObject(_swapChain1!.Object, typeof(IDXGISwapChain1));
                 return new string[]
                 {
-                    $"--winrt-d3dcontext=0x{_d3D11Device!.ImmediateContext.NativePointer.ToString("x")}",
-                    $"--winrt-swapchain=0x{_swapChain!.NativePointer.ToString("x")}"
+                    $"--winrt-d3dcontext=0x{deviceContextPtr.ToString("x")}",
+                    $"--winrt-swapchain=0x{swapChainPtr.ToString("x")}"
                 };
             }
         }
@@ -119,100 +119,64 @@ namespace LibVLCSharp.Platforms.UWP
                 return;
 
 
-            SharpDX.DXGI.Factory2? dxgiFactory = null;
+            IComObject<IDXGIFactory2>? dxgiFactory = null;
             try
             {
                 var deviceCreationFlags =
-                    DeviceCreationFlags.BgraSupport | DeviceCreationFlags.VideoSupport;
+                    D3D11_CREATE_DEVICE_FLAG.D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_FLAG.D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
 
 #if DEBUG
-                if (Windows.System.Profile.AnalyticsInfo.VersionInfo.DeviceFamily != Mobile)
-                    deviceCreationFlags |= DeviceCreationFlags.Debug;
-
                 try
                 {
-                    dxgiFactory = new SharpDX.DXGI.Factory2(true);
+                    dxgiFactory = DXGIFunctions.CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS.DXGI_CREATE_FACTORY_DEBUG);
                 }
-                catch (SharpDXException)
+                catch (Exception)
                 {
-                    dxgiFactory = new SharpDX.DXGI.Factory2(false);
+                    dxgiFactory = DXGIFunctions.CreateDXGIFactory2();
                 }
 #else
-                dxgiFactory = new SharpDX.DXGI.Factory2(false);
+                dxgiFactory = DXGIFunctions.CreateDXGIFactory2();
 #endif
-                _d3D11Device = null;
-                foreach (var adapter in dxgiFactory.Adapters)
-                {
-                    try
-                    {
-                        _d3D11Device = new SharpDX.Direct3D11.Device(adapter, deviceCreationFlags);
-                        break;
-                    }
-                    catch (SharpDXException)
-                    {
-                    }
-                }
 
-                if (_d3D11Device is null)
+                _d3d11Device = D3D11Functions.D3D11CreateDevice(null, D3D_DRIVER_TYPE.D3D_DRIVER_TYPE_HARDWARE, deviceCreationFlags, out _deviceContext);
+
+                if (_deviceContext is null)
                 {
                     throw new VLCException("Could not create Direct3D11 device : No compatible adapter found.");
                 }
 
-                _device = _d3D11Device.QueryInterface<SharpDX.DXGI.Device1>();
+                var desc = new DXGI_SWAP_CHAIN_DESC1();
+                desc.Width = (uint)(_panel.ActualWidth * _panel.CompositionScaleX);
+                desc.Height = (uint)(_panel.ActualHeight * _panel.CompositionScaleY);
+                desc.Format = DXGI_FORMAT.DXGI_FORMAT_B8G8R8A8_UNORM;
+                desc.Stereo = false;
+                desc.SampleDesc.Count = 1;
+                desc.SampleDesc.Quality = 0;
+                desc.BufferUsage = DirectN.Constants.DXGI_USAGE_RENDER_TARGET_OUTPUT;
+                desc.BufferCount = 2;
+                desc.SwapEffect = DXGI_SWAP_EFFECT.DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;  //improtant for XAML SwapChainPanel
+                desc.Flags = 0;
+                desc.AlphaMode = DXGI_ALPHA_MODE.DXGI_ALPHA_MODE_UNSPECIFIED;
+                desc.Scaling = DXGI_SCALING.DXGI_SCALING_STRETCH; //improtant for XAML SwapChainPanel
 
-                //Create the swapchain
-                var swapChainDescription = new SharpDX.DXGI.SwapChainDescription1
-                {
-                    Width = (int)(_panel.ActualWidth * _panel.CompositionScaleX),
-                    Height = (int)(_panel.ActualHeight * _panel.CompositionScaleY),
-                    Format = SharpDX.DXGI.Format.B8G8R8A8_UNorm,
-                    Stereo = false,
-                    SampleDescription =
-                    {
-                        Count = 1,
-                        Quality = 0
-                    },
-                    Usage = Usage.RenderTargetOutput,
-                    BufferCount = 2,
-                    SwapEffect = SwapEffect.FlipSequential,
-                    Flags = SwapChainFlags.None,
-                    AlphaMode = AlphaMode.Unspecified
-                };
+                IDXGIDevice1 dxgiDevice = _d3d11Device.As<IDXGIDevice1>(true);
+                _device1 = new ComObject<IDXGIDevice1>(dxgiDevice);
+                _device3 = new ComObject<IDXGIDevice3>(_device1.As<IDXGIDevice3>(true));
+                _swapChain1 = dxgiFactory.CreateSwapChainForComposition<IDXGISwapChain1>(_device1, desc);
+                _swapChain2 = new ComObject<IDXGISwapChain2>(_swapChain1.As<IDXGISwapChain2>(true));
 
-                _swapChain = new SharpDX.DXGI.SwapChain1(dxgiFactory, _d3D11Device, ref swapChainDescription);
+                var nativepanel = _panel.As<ISwapChainPanelNative>();
+                nativepanel.SetSwapChain(_swapChain1!.Object);
 
-                _device.MaximumFrameLatency = 1;
-
-                using (var panelNative = ComObject.As<ISwapChainPanelNative>(_panel))
-                {
-                    panelNative.SwapChain = _swapChain;
-                }
-
-                // This is necessary so we can call Trim() on suspend
-                _device3 = _device.QueryInterface<SharpDX.DXGI.Device3>();
-                if (_device3 == null)
-                {
-                    throw new VLCException("Failed to query interface \"Device3\"");
-                }
-
-                _swapChain2 = _swapChain.QueryInterface<SharpDX.DXGI.SwapChain2>();
-                if (_swapChain2 == null)
-                {
-                    throw new VLCException("Failed to query interface \"SwapChain2\"");
-                }
-
-                UpdateScale();
                 UpdateSize();
+                UpdateScale();
                 _loaded = true;
                 OnInitialized();
             }
             catch (Exception ex)
             {
                 DestroySwapChain();
-                if (ex is SharpDXException)
-                {
-                    throw new VLCException("SharpDX operation failed, see InnerException for details", ex);
-                }
+                throw new VLCException("DX operation failed, see InnerException for details", ex);
 
                 throw;
             }
@@ -233,50 +197,31 @@ namespace LibVLCSharp.Platforms.UWP
             _device3?.Dispose();
             _device3 = null;
 
-            _swapChain?.Dispose();
-            _swapChain = null;
+            _swapChain1?.Dispose();
+            _swapChain1 = null;
 
-            _device?.Dispose();
-            _device = null;
+            _device1?.Dispose();
+            _device1 = null;
 
-            _d3D11Device?.Dispose();
-            _d3D11Device = null;
+            _deviceContext?.Dispose();
+            _deviceContext = null;
 
             _loaded = false;
         }
 
-        readonly Guid SWAPCHAIN_WIDTH = new Guid(0xf1b59347, 0x1643, 0x411a, 0xad, 0x6b, 0xc7, 0x80, 0x17, 0x7a, 0x6, 0xb6);
-        readonly Guid SWAPCHAIN_HEIGHT = new Guid(0x6ea976a0, 0x9d60, 0x4bb7, 0xa5, 0xa9, 0x7d, 0xd1, 0x18, 0x7f, 0xc9, 0xbd);
+        object _CriticalLock = new object();
 
         /// <summary>
         /// Associates width/height private data into the SwapChain, so that VLC knows at which size to render its video.
         /// </summary>
         void UpdateSize()
         {
-            if (_panel is null || _swapChain is null || _swapChain.IsDisposed)
+            if (_panel is null || _swapChain1 is null || _swapChain1.IsDisposed)
                 return;
 
-            var width = IntPtr.Zero;
-            var height = IntPtr.Zero;
-
-            try
+            lock (_CriticalLock)
             {
-                width = Marshal.AllocHGlobal(sizeof(int));
-                height = Marshal.AllocHGlobal(sizeof(int));
-
-                var w = (int)(_panel.ActualWidth * _panel.CompositionScaleX);
-                var h = (int)(_panel.ActualHeight * _panel.CompositionScaleY);
-
-                Marshal.WriteInt32(width, w);
-                Marshal.WriteInt32(height, h);
-
-                _swapChain.SetPrivateData(SWAPCHAIN_WIDTH, sizeof(int), width);
-                _swapChain.SetPrivateData(SWAPCHAIN_HEIGHT, sizeof(int), height);
-            }
-            finally
-            {
-                Marshal.FreeHGlobal(width);
-                Marshal.FreeHGlobal(height);
+                _swapChain1!.Object.ResizeBuffers(2, (uint)_panel.ActualWidth, (uint)_panel.ActualHeight, DXGI_FORMAT.DXGI_FORMAT_B8G8R8A8_UNORM, 0);
             }
         }
 
@@ -286,15 +231,15 @@ namespace LibVLCSharp.Platforms.UWP
         void UpdateScale()
         {
             if (_panel is null) return;
-            _swapChain2!.MatrixTransform = new RawMatrix3x2 { M11 = 1.0f / _panel.CompositionScaleX, M22 = 1.0f / _panel.CompositionScaleY };
+            _swapChain2!.Object.SetMatrixTransform(new DXGI_MATRIX_3X2_F { _11 = 1.0f / _panel.CompositionScaleX, _22 = 1.0f / _panel.CompositionScaleY });
         }
 
         /// <summary>
         /// When the app is suspended, UWP apps should call Trim so that the DirectX data is cleaned.
         /// </summary>
-        void Trim()
+        public void Trim()
         {
-            _device3?.Trim();
+            _device3?.Object.Trim();
         }
 
         /// <summary>
