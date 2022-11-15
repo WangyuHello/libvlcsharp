@@ -23,8 +23,8 @@
     <Compile Include="Platforms\WindowsApp\**\*.cs" />
     <PackageReference Include="System.ValueTuple" Version="4.5.0" />
     <PackageReference Include="System.Memory" Version="4.5.4" />
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.1.0" />
-	<PackageReference Include="DirectNCore" Version="1.13.0" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.2.220930.4-preview2" />
+    <PackageReference Include="DirectNCore" Version="1.13.0" />
   </ItemGroup>
 
 </Project>
